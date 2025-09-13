@@ -1,0 +1,39 @@
+name: Discord: Changelog on push
+on:
+  push:
+    branches: [ "main", "master" ]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Build pretty embed and send to Discord
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          PUSHER: ${{ github.event.pusher.name }}
+          COMPARE: ${{ github.event.compare }}
+          EVENT_PATH: ${{ github.event_path }}
+        run: |
+          COMMITS=$(jq -r '.commits[] | "* [`\(.id[0:7])`](\(.url)) — \(.message | split("\n")[0])"' "$EVENT_PATH" | head -n 10)
+          [ -z "$COMMITS" ] && COMMITS="(no commit messages)"
+          TITLE="$PUSHER pushed to branch $BRANCH of $REPO"
+          DESC="$COMMITS
+
+[Compare changes]($COMPARE)"
+
+          jq -n --arg title "$TITLE" --arg desc "$DESC" \
+            '{
+              username: "git changes",
+              embeds: [{
+                title: $title,
+                description: $desc,
+                color: 5814783,
+                timestamp: (now | todate)
+              }]
+            }' \
+          | curl -sS -H "Content-Type: application/json" -d @- "$WEBHOOK"
