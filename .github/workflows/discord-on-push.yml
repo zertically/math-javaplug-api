@@ -3,7 +3,6 @@ on:
   push:
     branches: [main, master]
 
-# ✅ Prefer a secret. If you're still hard-coding while testing, replace WEBHOOK below with the raw URL string.
 env:
   WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
@@ -11,60 +10,48 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
-      - name: Post commit info to Discord (robust)
+      - name: Post changelog to Discord (curl, robust)
         shell: bash
         env:
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.ref_name }}
           ACTOR: ${{ github.actor }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          COMPARE: ${{ github.event.compare }}
         run: |
-          python3 - <<'PY'
-          import os, json, sys, urllib.request, urllib.error, pathlib
+          # Build JSON in Python (safe escaping), send with curl (avoids CF 1010)
+          json_payload=$(python3 - <<'PY'
+          import os, json
+          import pathlib
+          evt_path = os.environ["GITHUB_EVENT_PATH"]
+          evt = json.loads(pathlib.Path(evt_path).read_text(encoding="utf-8"))
 
-          # --- setup ---
-          url = os.environ.get("WEBHOOK")
-          if not url:
-            print("ERROR: WEBHOOK not set (use secrets.DISCORD_WEBHOOK_URL or hard-code temporarily)", file=sys.stderr)
-            sys.exit(2)
-          if "?" not in url:
-            url += "?wait=true"  # return 200 + body on success
-
-          event_path = os.environ.get("GITHUB_EVENT_PATH")
-          if not event_path or not pathlib.Path(event_path).exists():
-            print(f"ERROR: GITHUB_EVENT_PATH not found: {event_path!r}", file=sys.stderr)
-            sys.exit(3)
-
-          with open(event_path, "r", encoding="utf-8") as f:
-            evt = json.load(f)
-
-          # --- gather data ---
           repo   = os.environ.get("REPO","")
           branch = os.environ.get("BRANCH","")
           actor  = os.environ.get("ACTOR","")
-          compare = evt.get("compare","")
+          compare= os.environ.get("COMPARE","")
 
           head = evt.get("head_commit") or {}
           head_msg = (head.get("message") or "").splitlines()[0]
           head_url = head.get("url","")
           head_sha = (head.get("id","") or "")[:7]
 
-          commits = []
+          commits=[]
           for c in (evt.get("commits") or [])[:10]:
-            sha = (c.get("id","") or "")[:7]
-            urlc = c.get("url","")
-            msg = (c.get("message") or "").splitlines()[0].replace("\r","")
-            commits.append(f"* [`{sha}`]({urlc}) — {msg}")
+              sha=(c.get("id","") or "")[:7]
+              url=c.get("url","")
+              msg=(c.get("message") or "").splitlines()[0].replace("\r","")
+              commits.append(f"* [`{sha}`]({url}) — {msg}")
           if not commits:
-            commits = ["(no commit messages)"]
-          commit_list = "\n".join(commits)
+              commits=["(no commit messages)"]
 
           title = f"Pushed to {repo}: {branch}"
           desc  = f"**{head_msg or '(no head commit message)'}**"
           if head_sha and head_url:
-            desc += f"\n\n[`{head_sha}` commit]({head_url})"
+              desc += f"\n\n[`{head_sha}` commit]({head_url})"
           if compare:
-            desc += f" · [Compare]({compare})"
-          desc += f"\n\n{commit_list}"
+              desc += f" · [Compare]({compare})"
+          desc += "\n\n" + "\n".join(commits)
 
           payload = {
             "username": "git changes",
@@ -75,16 +62,12 @@ jobs:
               "footer": {"text": f"by {actor}"}
             }]
           }
-
-          req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-                                       headers={"Content-Type":"application/json"})
-          try:
-            with urllib.request.urlopen(req) as r:
-              print("Discord status:", r.status)
-              print("Body:", r.read().decode())
-          except urllib.error.HTTPError as e:
-            print("HTTPError:", e.code)
-            try: print("Error body:", e.read().decode())
-            except: pass
-            sys.exit(1)
+          print(json.dumps(payload))
           PY
+          )
+
+          # Send to Discord; ?wait=true returns 200 and helps debugging
+          curl -fsS -A "GitHubActions/1.0" \
+               -H "Content-Type: application/json" \
+               -d "$json_payload" \
+               "$WEBHOOK?wait=true"
