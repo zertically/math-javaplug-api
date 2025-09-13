@@ -3,7 +3,7 @@ on:
   push:
     branches: [main, master]
 
-# Prefer a secret. If you still have it hard-coded, replace the line below accordingly.
+# ✅ Prefer a secret. If you're still hard-coding while testing, replace WEBHOOK below with the raw URL string.
 env:
   WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
@@ -11,37 +11,80 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
-      - name: Send pretty embed with commit info
+      - name: Post commit info to Discord (robust)
+        shell: bash
         env:
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.ref_name }}
           ACTOR: ${{ github.actor }}
-          COMPARE: ${{ github.event.compare }}
         run: |
           python3 - <<'PY'
-          import os, json, urllib.request, urllib.error, sys
+          import os, json, sys, urllib.request, urllib.error, pathlib
 
+          # --- setup ---
           url = os.environ.get("WEBHOOK")
           if not url:
-            print("ERROR: missing WEBHOOK (use secrets.DISCORD_WEBHOOK_URL or hard-code temporarily)", file=sys.stderr)
+            print("ERROR: WEBHOOK not set (use secrets.DISCORD_WEBHOOK_URL or hard-code temporarily)", file=sys.stderr)
             sys.exit(2)
           if "?" not in url:
             url += "?wait=true"  # return 200 + body on success
 
           event_path = os.environ.get("GITHUB_EVENT_PATH")
-          if not event_path or not os.path.exists(event_path):
+          if not event_path or not pathlib.Path(event_path).exists():
             print(f"ERROR: GITHUB_EVENT_PATH not found: {event_path!r}", file=sys.stderr)
             sys.exit(3)
 
           with open(event_path, "r", encoding="utf-8") as f:
             evt = json.load(f)
 
-          repo   = os.environ["REPO"]
-          branch = os.environ["BRANCH"]
-          actor  = os.environ["ACTOR"]
-          compare= os.environ.get("COMPARE","")
+          # --- gather data ---
+          repo   = os.environ.get("REPO","")
+          branch = os.environ.get("BRANCH","")
+          actor  = os.environ.get("ACTOR","")
+          compare = evt.get("compare","")
 
-          head    = evt.get("head_commit") or {}
-          head_msg= (head.get("message") or "").splitlines()[0]
-          head_url= head.get("url","")
-          h
+          head = evt.get("head_commit") or {}
+          head_msg = (head.get("message") or "").splitlines()[0]
+          head_url = head.get("url","")
+          head_sha = (head.get("id","") or "")[:7]
+
+          commits = []
+          for c in (evt.get("commits") or [])[:10]:
+            sha = (c.get("id","") or "")[:7]
+            urlc = c.get("url","")
+            msg = (c.get("message") or "").splitlines()[0].replace("\r","")
+            commits.append(f"* [`{sha}`]({urlc}) — {msg}")
+          if not commits:
+            commits = ["(no commit messages)"]
+          commit_list = "\n".join(commits)
+
+          title = f"Pushed to {repo}: {branch}"
+          desc  = f"**{head_msg or '(no head commit message)'}**"
+          if head_sha and head_url:
+            desc += f"\n\n[`{head_sha}` commit]({head_url})"
+          if compare:
+            desc += f" · [Compare]({compare})"
+          desc += f"\n\n{commit_list}"
+
+          payload = {
+            "username": "git changes",
+            "embeds": [{
+              "title": title,
+              "description": desc,
+              "color": 5814783,
+              "footer": {"text": f"by {actor}"}
+            }]
+          }
+
+          req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                       headers={"Content-Type":"application/json"})
+          try:
+            with urllib.request.urlopen(req) as r:
+              print("Discord status:", r.status)
+              print("Body:", r.read().decode())
+          except urllib.error.HTTPError as e:
+            print("HTTPError:", e.code)
+            try: print("Error body:", e.read().decode())
+            except: pass
+            sys.exit(1)
+          PY
