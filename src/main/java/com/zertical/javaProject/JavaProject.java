@@ -13,7 +13,7 @@ public class JavaProject {
                 "Java", "Mikkel", "Isak"}; // JAVA = index 0, MIKKEL = index 1, ISAK = index 2
 
         List<String> list = new ArrayList<>();
- // test s
+ // test
         list.add("Java"); // index 0
         list.add("Mikkel"); // index 1
 
