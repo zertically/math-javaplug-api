@@ -1,60 +1,79 @@
 name: discord-on-push
 on:
   push:
-    branches: [main, master]
+    branches: [main, master]   # add more if you like
 
 env:
-  WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+  # Put the webhook in repo Settings → Secrets and variables → Actions
+  WEBHOOK_DEFAULT: ${{ secrets.DISCORD_WEBHOOK_URL }}
+  # Optional: per-branch webhook (e.g., production channel)
+  WEBHOOK_PROD: ${{ secrets.DISCORD_WEBHOOK_URL_PROD }}
 
 jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
-      - name: Post changelog to Discord (curl, robust)
+      - name: Build JSON (Python) and send (curl)
         shell: bash
         env:
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.ref_name }}
           ACTOR: ${{ github.actor }}
-          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          AVATAR: ${{ github.event.sender.avatar_url }}
           COMPARE: ${{ github.event.compare }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
         run: |
-          # Build JSON in Python (safe escaping), send with curl (avoids CF 1010)
-          json_payload=$(python3 - <<'PY'
-          import os, json
-          import pathlib
-          evt_path = os.environ["GITHUB_EVENT_PATH"]
-          evt = json.loads(pathlib.Path(evt_path).read_text(encoding="utf-8"))
+          # choose webhook (per-branch override)
+          WEBHOOK="$WEBHOOK_DEFAULT"
+          if [ "$BRANCH" = "prod" ] && [ -n "$WEBHOOK_PROD" ]; then
+            WEBHOOK="$WEBHOOK_PROD"
+          fi
 
-          repo   = os.environ.get("REPO","")
-          branch = os.environ.get("BRANCH","")
-          actor  = os.environ.get("ACTOR","")
-          compare= os.environ.get("COMPARE","")
+          json_payload=$(python3 - <<'PY'
+          import os, json, pathlib, textwrap
+
+          evt = json.loads(pathlib.Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+          repo   = os.environ["REPO"]
+          branch = os.environ["BRANCH"]
+          actor  = os.environ["ACTOR"]
+          avatar = os.environ.get("AVATAR") or None
+          compare= os.environ.get("COMPARE") or ""
 
           head = evt.get("head_commit") or {}
-          head_msg = (head.get("message") or "").splitlines()[0]
-          head_url = head.get("url","")
-          head_sha = (head.get("id","") or "")[:7]
+          head_msg = (head.get("message") or "").strip().splitlines()[0]
+          head_url = head.get("url") or ""
+          head_sha = (head.get("id") or "")[:7]
 
-          commits=[]
+          # Build up to 10 commit bullets; clip to Discord limits
+          commits = []
           for c in (evt.get("commits") or [])[:10]:
-              sha=(c.get("id","") or "")[:7]
-              url=c.get("url","")
-              msg=(c.get("message") or "").splitlines()[0].replace("\r","")
-              commits.append(f"* [`{sha}`]({url}) — {msg}")
+              sha = (c.get("id") or "")[:7]
+              url = c.get("url") or ""
+              msg = (c.get("message") or "").strip().splitlines()[0].replace("\r","")
+              if len(msg) > 120:
+                  msg = msg[:117] + "…"
+              commits.append(f"• [`{sha}`]({url}) — {msg}")
           if not commits:
-              commits=["(no commit messages)"]
+              commits = ["(no commit messages)"]
 
           title = f"Pushed to {repo}: {branch}"
-          desc  = f"**{head_msg or '(no head commit message)'}**"
+          desc  = (head_msg or "(no head commit message)")
+          parts = []
           if head_sha and head_url:
-              desc += f"\n\n[`{head_sha}` commit]({head_url})"
+              parts.append(f"[`{head_sha}` commit]({head_url})")
           if compare:
-              desc += f" · [Compare]({compare})"
-          desc += "\n\n" + "\n".join(commits)
+              parts.append(f"[Compare]({compare})")
+          if parts:
+              desc += "\\n\\n" + " · ".join(parts)
+          desc += "\\n\\n" + "\\n".join(commits)
+
+          # Discord limits: description 4096 chars
+          if len(desc) > 4096:
+              desc = desc[:4093] + "…"
 
           payload = {
             "username": "git changes",
+            **({"avatar_url": avatar} if avatar else {}),
             "embeds": [{
               "title": title,
               "description": desc,
@@ -66,7 +85,7 @@ jobs:
           PY
           )
 
-          # Send to Discord; ?wait=true returns 200 and helps debugging
+          # Send with curl (avoid Cloudflare 1010); ?wait=true returns 200 + body
           curl -fsS -A "GitHubActions/1.0" \
                -H "Content-Type: application/json" \
                -d "$json_payload" \
