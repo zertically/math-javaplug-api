@@ -1,26 +1,92 @@
 name: discord-on-push
 on:
   push:
-    branches: [main, master]
+    branches: [main, master]   # add more if you like
+
+env:
+  # Put the webhook in repo Settings → Secrets and variables → Actions
+  WEBHOOK_DEFAULT: ${{ secrets.DISCORD_WEBHOOK_URL }}
+  # Optional: per-branch webhook (e.g., production channel)
+  WEBHOOK_PROD: ${{ secrets.DISCORD_WEBHOOK_URL_PROD }}
 
 jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
-      - name: Fail if secret missing
-        run: |
-          [ -z "${{ secrets.DISCORD_WEBHOOK_URL }}" ] && echo "Missing DISCORD_WEBHOOK_URL" && exit 1 || true
-
-      - name: Send simple test message to Discord
+      - name: Build JSON (Python) and send (curl)
+        shell: bash
         env:
-          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+          AVATAR: ${{ github.event.sender.avatar_url }}
+          COMPARE: ${{ github.event.compare }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
         run: |
-          python3 - <<'PY'
-          import os, json, urllib.request
-          url = os.environ["WEBHOOK"]
-          payload = {"content": "GitHub Actions → Discord webhook works."}
-          req = urllib.request.Request(url, data=json.dumps(payload).encode(),
-                                       headers={"Content-Type": "application/json"})
-          with urllib.request.urlopen(req) as r:
-              print("Discord HTTP status:", r.status)
+          # choose webhook (per-branch override)
+          WEBHOOK="$WEBHOOK_DEFAULT"
+          if [ "$BRANCH" = "prod" ] && [ -n "$WEBHOOK_PROD" ]; then
+            WEBHOOK="$WEBHOOK_PROD"
+          fi
+
+          json_payload=$(python3 - <<'PY'
+          import os, json, pathlib, textwrap
+
+          evt = json.loads(pathlib.Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+          repo   = os.environ["REPO"]
+          branch = os.environ["BRANCH"]
+          actor  = os.environ["ACTOR"]
+          avatar = os.environ.get("AVATAR") or None
+          compare= os.environ.get("COMPARE") or ""
+
+          head = evt.get("head_commit") or {}
+          head_msg = (head.get("message") or "").strip().splitlines()[0]
+          head_url = head.get("url") or ""
+          head_sha = (head.get("id") or "")[:7]
+
+          # Build up to 10 commit bullets; clip to Discord limits
+          commits = []
+          for c in (evt.get("commits") or [])[:10]:
+              sha = (c.get("id") or "")[:7]
+              url = c.get("url") or ""
+              msg = (c.get("message") or "").strip().splitlines()[0].replace("\r","")
+              if len(msg) > 120:
+                  msg = msg[:117] + "…"
+              commits.append(f"• [`{sha}`]({url}) — {msg}")
+          if not commits:
+              commits = ["(no commit messages)"]
+
+          title = f"Pushed to {repo}: {branch}"
+          desc  = (head_msg or "(no head commit message)")
+          parts = []
+          if head_sha and head_url:
+              parts.append(f"[`{head_sha}` commit]({head_url})")
+          if compare:
+              parts.append(f"[Compare]({compare})")
+          if parts:
+              desc += "\\n\\n" + " · ".join(parts)
+          desc += "\\n\\n" + "\\n".join(commits)
+
+          # Discord limits: description 4096 chars
+          if len(desc) > 4096:
+              desc = desc[:4093] + "…"
+
+          payload = {
+            "username": "git changes",
+            **({"avatar_url": avatar} if avatar else {}),
+            "embeds": [{
+              "title": title,
+              "description": desc,
+              "color": 5814783,
+              "footer": {"text": f"by {actor}"}
+            }]
+          }
+          print(json.dumps(payload))
           PY
+          )
+
+          # Send with curl (avoid Cloudflare 1010); ?wait=true returns 200 + body
+          curl -fsS -A "GitHubActions/1.0" \
+               -H "Content-Type: application/json" \
+               -d "$json_payload" \
+               "$WEBHOOK?wait=true"
