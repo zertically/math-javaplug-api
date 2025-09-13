@@ -1,52 +1,26 @@
-name: Discord: Changelog on push
+name: discord-on-push
 on:
   push:
-    branches: [ "main", "master" ]  # adjust if needed
+    branches: [main, master]
 
 jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
-      - name: Fail early if the secret is missing
+      - name: Fail if secret missing
         run: |
-          if [ -z "${{ secrets.DISCORD_WEBHOOK_URL }}" ]; then
-            echo "Missing secret DISCORD_WEBHOOK_URL" >&2
-            exit 1
-          fi
+          [ -z "${{ secrets.DISCORD_WEBHOOK_URL }}" ] && echo "Missing DISCORD_WEBHOOK_URL" && exit 1 || true
 
-      - name: Send a simple embed (no external tools)
+      - name: Send simple test message to Discord
         env:
           WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          REPO: ${{ github.repository }}
-          BRANCH: ${{ github.ref_name }}
-          ACTOR: ${{ github.actor }}
-          PUSHER: ${{ github.event.pusher.name }}
-          COMPARE: ${{ github.event.compare }}
-          HEAD_MSG: ${{ github.event.head_commit.message }}
-          HEAD_URL: ${{ github.event.head_commit.url }}
-          HEAD_SHA: ${{ github.event.head_commit.id }}
         run: |
-          python - <<'PY'
-          import json, os, urllib.request
-          w=os.environ['WEBHOOK']
-          repo=os.environ['REPO']; br=os.environ['BRANCH']
-          actor=os.environ['ACTOR']; pusher=os.environ.get('PUSHER','')
-          compare=os.environ.get('COMPARE','')
-          msg=(os.environ.get('HEAD_MSG') or '').splitlines()[0]
-          url=os.environ.get('HEAD_URL',''); sha=(os.environ.get('HEAD_SHA') or '')[:7]
-
-          payload = {
-            "username": "git changes",
-            "embeds": [{
-              "title": f"Pushed to {repo}: {br}",
-              "description": f"**{msg}**\n\n[`{sha}` commit]({url}) · [Compare]({compare})",
-              "color": 5814783,
-              "footer": {"text": f"by {actor}"}
-            }]
-          }
-
-          req = urllib.request.Request(w, data=json.dumps(payload).encode(),
-                                       headers={"Content-Type":"application/json"})
+          python3 - <<'PY'
+          import os, json, urllib.request
+          url = os.environ["WEBHOOK"]
+          payload = {"content": "GitHub Actions → Discord webhook works."}
+          req = urllib.request.Request(url, data=json.dumps(payload).encode(),
+                                       headers={"Content-Type": "application/json"})
           with urllib.request.urlopen(req) as r:
-              print("Discord response:", r.status)
+              print("Discord HTTP status:", r.status)
           PY
