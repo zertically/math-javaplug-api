@@ -1,0 +1,4 @@
+name: JavaProject
+version: '1.0-SNAPSHOT'
+main: com.zertical.javaProject.JavaProject
+api-version: '1.21'
